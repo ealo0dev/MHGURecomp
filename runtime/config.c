@@ -94,6 +94,7 @@
     .combo_window = COMBO_LENIENT,                                                                  \
     .chat_key = "/",                                                                                \
     .menu_chord = 1,                                                                                \
+    .title_back_exit = 1,                                                                           \
     /* [Mouse] */                                                                                   \
     .mouse_sensitivity = 1.0f,                                                                      \
     .mouse_sensitivity_y = 1.0f,                                                                    \
@@ -109,11 +110,13 @@
     .ldn_server = "",                                                                               \
     .ldn_key = "",                                                                                  \
     .ldn_direct = 1,                                                                                \
+    .ldn_ryu_serve_port = 30456,                                                                    \
+    .ldn_room_serve_port = 24872,                                                                   \
     .sync_small_monsters = 1,                                                                       \
     .lag_compensation = 1,                                                                          \
     .share_urgent = 1,                                                                              \
     /* [Monster HP, Village Quests] */                                                              \
-    .hp = {{1, 1, 1, 1}, 1.6f},                                                                     \
+    .hp = {{1, 1, 1, 1}, 1.5f},                                                                     \
     .village_in_hub = 1,                                                                            \
     /* [Quest Rewards] */                                                                           \
     .quest_hold_send = 1,                                                                           \
@@ -134,6 +137,9 @@
     .menu_scale = 100,                                                                              \
     .updates = UPDATES_ASK,                                                                         \
     .save_location = "",                                                                            \
+    .backups_on = 1,                                                                                \
+    .save_backups = 10,                                                                             \
+    .backup_location = "",                                                                          \
 
 Config g_config = {CONFIG_DEFAULT_VALUES};
 Config config_defaults(void) { Config c = {CONFIG_DEFAULT_VALUES}; return c; }
@@ -378,6 +384,11 @@ static const char DEFAULT_INI[] =
     "; Default: On\n"
     "MenuChord = On\n"
     "\n"
+    "; B (the menus' Back) on the title screen's Main Menu asks to quit the game. Turn it off when a mod swaps the\n"
+    "; menus' Confirm and Back, so that confirming there no longer asks\n"
+    "; Default: On\n"
+    "TitleBackExit = On\n"
+    "\n"
     "; The key that opens a line of chat, anywhere (in a quest too): a key's name as the settings menu shows it, or\n"
     "; nothing for none\n"
     "; Default: /\n"
@@ -542,8 +553,8 @@ static const char DEFAULT_INI[] =
     "\n"
     "; When playing a Village Quest from the Hub, first multiply the monster HP by this amount.\n"
     "; This amount is then scaled again by the [Monster HP] settings.\n"
-    "; Default: 1.6\n"
-    "HubHP = 1.6\n"
+    "; Default: 1.5\n"
+    "HubHP = 1.5\n"
     "\n"
     "[Quest Rewards]\n"
     "; At the end of a quest, press and hold A on the Reward Box (Send to the Item Box option) to rapidly send items one-by-one, similar to World/Rise/Wilds.\n"
@@ -582,6 +593,11 @@ static const char DEFAULT_INI[] =
     "; Default: Stereo\n"
     "Output = Stereo\n"
     "\n"
+    "; Playback device, by its name as the settings menu lists it (\"Speakers (Realtek(R) Audio)\"...): always that\n"
+    "; device, no sound while it is unplugged. Empty or Default: the system's default device, followed when it changes.\n"
+    "; Default: empty\n"
+    "Device =\n"
+    "\n"
     "[Application]\n"
     "; Ask before the game window closes (closing does not save the game)\n"
     "; Default: On\n"
@@ -617,6 +633,21 @@ static const char DEFAULT_INI[] =
     "; folder. Empty: the default (%APPDATA%\\MHGURecomp\\save on Windows, ~/.local/share/MHGURecomp/save on Linux).\n"
     "; Your save is not moved: copy save_0 there yourself. Takes effect at the next start\n"
     "SaveLocation =\n"
+    "\n"
+    "[Save Backups]\n"
+    "; Each time the game saves, a copy of save_0's files goes in a folder named after the date and time.\n"
+    "; To restore one, close the game and copy its files into save_0. Off: no backups (those made stay)\n"
+    "; Default: On\n"
+    "Backups = On\n"
+    "\n"
+    "; How many backups are kept: past this many, the oldest is deleted\n"
+    "; Between 1 and 100\n"
+    "; Default: 10\n"
+    "BackupsKept = 10\n"
+    "\n"
+    "; PC only. The folder the save backups go in. Empty: a backups folder in the save folder, beside save_0.\n"
+    "; Takes effect at the next start\n"
+    "BackupLocation =\n"
     "\n"
     "[Android]\n"
     "; Android only. The folder the save is kept in, so syncing software can keep it in step: the one that holds save_0. Empty: the app's own\n"
@@ -733,7 +764,10 @@ static bool parse_aspect(const char *v, float *out) {
 #define ERR_FSR "Invalid FSR quality, sharpness or reactive mask."
 #define ERR_NET "Invalid port or Join address list (no newlines, ';' or '#')."
 #define ERR_SERVER "Invalid hub server or matchmaking key (no newlines, ';' or '#')."
+#define ERR_CROSSPLAY "Invalid emulator crossplay address, name or password (no newlines, ';' or '#')."
 #define ERR_FOLDER "Invalid save folder (one line, no ';' or '#')."
+#define ERR_BACKUPS "Backups to keep must be 1-100."
+#define ERR_BACKUP_FOLDER "Invalid backup folder (one line, no ';' or '#')."
 #define ERR_GAME_FOLDER "Invalid game files folder (one line, no ';' or '#')."
 #define ERR_HP "HP factors must be 0.05-20."
 #define ERR_VILLAGE "Invalid village HP or quest override count."
@@ -805,6 +839,7 @@ const ConfigSetting g_settings[] = {
     ON_OFF("Controls", "BackgroundInput", background_input, false),
     ON_OFF("Controls", "KeyboardPrompts", kbm_prompts, false),
     ON_OFF("Controls", "MenuChord", menu_chord, false),
+    ON_OFF("Controls", "TitleBackExit", title_back_exit, false),
     {"Controls", "ComboInputWindow", SET_CHOICE, F(combo_window), 0, 0, 0, "Lenient,Strict", NULL, false, ERR_MISC},
     {"Controls", "ChatKey", SET_TEXT, F(chat_key), sizeof g_config.chat_key, 0, 0, NULL, NULL, false, ERR_MISC},
     {"Mouse", "MouseSensitivity", SET_FLOAT, F(mouse_sensitivity), 0, 0.1f, 10.0f, NULL, NULL, false, ERR_VIEW},
@@ -836,23 +871,25 @@ const ConfigSetting g_settings[] = {
     ON_OFF("Village Quests", "VillageQuestsInHub", village_in_hub, false),
     {"Village Quests", "HubHP", SET_FACTOR, F(hp.village), 0, HP_SCALE_MIN, HP_SCALE_MAX, NULL, NULL, false, ERR_VILLAGE},
     ON_OFF("Quest Rewards", "HoldASend", quest_hold_send, false),
-    {"Multiplayer", "RyuServers", SET_TEXT, F(ldn_ryu_servers), sizeof g_config.ldn_ryu_servers, 0, 0, NULL, NULL, false, ERR_SERVER},
-    {"Multiplayer", "RyuHost", SET_TEXT, F(ldn_ryu_host), sizeof g_config.ldn_ryu_host, 0, 0, NULL, NULL, false, ERR_SERVER},
-    {"Multiplayer", "RyuPassphrase", SET_TEXT, F(ldn_ryu_pass), sizeof g_config.ldn_ryu_pass, 0, 0, NULL, NULL, false, ERR_SERVER},
-    {"Multiplayer", "RoomServer", SET_TEXT, F(ldn_room_server), sizeof g_config.ldn_room_server, 0, 0, NULL, NULL, false, ERR_SERVER},
-    {"Multiplayer", "RoomPassword", SET_TEXT, F(ldn_room_pass), sizeof g_config.ldn_room_pass, 0, 0, NULL, NULL, false, ERR_SERVER},
-    {"Multiplayer", "RoomName", SET_TEXT, F(ldn_room_nick), sizeof g_config.ldn_room_nick, 0, 0, NULL, NULL, false, ERR_SERVER},
-    ON_OFF("Multiplayer", "RoomHost", ldn_room_host, false),
-    ON_OFF("Multiplayer", "RyuServe", ldn_ryu_serve, false),
-    {"Multiplayer", "RyuServePort", SET_INT, F(ldn_ryu_serve_port), 0, 0, 65535, NULL, NULL, false, ERR_NET},
-    ON_OFF("Multiplayer", "RoomServe", ldn_room_serve, false),
-    {"Multiplayer", "RoomServePort", SET_INT, F(ldn_room_serve_port), 0, 0, 65535, NULL, NULL, false, ERR_NET},
+    // (crossplay: runtime/net reads these from g_config, so a change takes effect at the next start)
+    {"Multiplayer", "RyuServers", SET_TEXT, F(ldn_ryu_servers), sizeof g_config.ldn_ryu_servers, 0, 0, NULL, NULL, true, ERR_CROSSPLAY},
+    {"Multiplayer", "RyuHost", SET_TEXT, F(ldn_ryu_host), sizeof g_config.ldn_ryu_host, 0, 0, NULL, NULL, true, ERR_CROSSPLAY},
+    {"Multiplayer", "RyuPassphrase", SET_TEXT, F(ldn_ryu_pass), sizeof g_config.ldn_ryu_pass, 0, 0, NULL, NULL, true, ERR_CROSSPLAY},
+    {"Multiplayer", "RoomServer", SET_TEXT, F(ldn_room_server), sizeof g_config.ldn_room_server, 0, 0, NULL, NULL, true, ERR_CROSSPLAY},
+    {"Multiplayer", "RoomPassword", SET_TEXT, F(ldn_room_pass), sizeof g_config.ldn_room_pass, 0, 0, NULL, NULL, true, ERR_CROSSPLAY},
+    {"Multiplayer", "RoomName", SET_TEXT, F(ldn_room_nick), sizeof g_config.ldn_room_nick, 0, 0, NULL, NULL, true, ERR_CROSSPLAY},
+    ON_OFF("Multiplayer", "RoomHost", ldn_room_host, true),
+    ON_OFF("Multiplayer", "RyuServe", ldn_ryu_serve, true),
+    {"Multiplayer", "RyuServePort", SET_INT, F(ldn_ryu_serve_port), 0, 0, 65535, NULL, NULL, true, ERR_NET},
+    ON_OFF("Multiplayer", "RoomServe", ldn_room_serve, true),
+    {"Multiplayer", "RoomServePort", SET_INT, F(ldn_room_serve_port), 0, 0, 65535, NULL, NULL, true, ERR_NET},
     ON_OFF("Discord", "RichPresence", discord, false),
     ON_OFF("Discord", "ShowHunter", discord_hunter, false),
     ON_OFF("Bonus Content", "BonusContent", bonus_content, false),
     {"Audio", "Volume", SET_INT, F(volume), 0, 0, 100, NULL, NULL, false, ERR_MISC},
     ON_OFF("Audio", "MuteInBackground", mute_in_background, false),
     {"Audio", "Output", SET_CHOICE, F(audio_output), 0, 0, 0, "Stereo|2.0,5.1|surround|5.1surround", NULL, false, ERR_MISC},
+    {"Audio", "Device", SET_TEXT, F(audio_device), sizeof g_config.audio_device, 0, 0, NULL, NULL, false, ERR_MISC},
     ON_OFF("Application", "ConfirmExit", confirm_exit, false),
     {"Application", "Language", SET_CHOICE, F(language), 0, 0, 0, "English|en,Spanish|es,中文|zh|chinese,한국어|ko|korean", NULL, false, ERR_LANGUAGE},
     {"Application", "ButtonIcons", SET_CHOICE, F(button_icons), 0, 0, 0, "Xbox,Switch,PlayStation", NULL, false, ERR_ICONS},
@@ -860,6 +897,9 @@ const ConfigSetting g_settings[] = {
     {"Application", "MenuScale", SET_INT, F(menu_scale), 0, 50, 200, NULL, NULL, false, ERR_SCALE},
     {"Application", "Updates", SET_CHOICE, F(updates), 0, 0, 0, "Ask,Auto|automatic,Off|never", NULL, false, ERR_UPDATES},
     {"Application", "SaveLocation", SET_TEXT, F(save_location), sizeof g_config.save_location, 0, 0, NULL, NULL, true, ERR_FOLDER},
+    ON_OFF("Save Backups", "Backups", backups_on, false),
+    {"Save Backups", "BackupsKept", SET_INT, F(save_backups), 0, 1, 100, NULL, NULL, false, ERR_BACKUPS},
+    {"Save Backups", "BackupLocation", SET_TEXT, F(backup_location), sizeof g_config.backup_location, 0, 0, NULL, NULL, true, ERR_BACKUP_FOLDER},
 };
 #undef ON_OFF
 #undef KEYS

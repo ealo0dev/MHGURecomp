@@ -24,6 +24,23 @@
 
 #include "imgui.h"
 #include "imgui_internal.h"  // (the Forge window's Cancel: ImGui's active item, popups and nav window)
+// stb_truetype's own copy (ImGui's is static to imgui_draw.cpp): a font file is checked with it before ImGui gets it,
+// since ImGui stops the program on one it can't read (font_merge)
+namespace font_check {
+#define STBTT_STATIC
+#define STB_TRUETYPE_IMPLEMENTATION
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wimplicit-fallthrough"
+#endif
+#include "imstb_truetype.h"
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+#undef STB_TRUETYPE_IMPLEMENTATION
+#undef STBTT_STATIC
+}  // namespace font_check
 #ifndef MHGU_NULL_BACKEND
 #include "backends/imgui_impl_vulkan.h"
 #else  // (no renderer: no overlay)
@@ -52,6 +69,14 @@ SDL_Window *ui_window(void);
 bool shader_prewarm_progress(uint64_t *done, uint64_t *total);  // (runtime/nvn/vulkan/exec.c)
 bool romfs_mods_progress(int *done, int *total);                // (runtime/romfs.c)
 bool plat_exe_path(char *buf, size_t size);                     // (runtime/platform.h)
+const char *plat_utf8_path(const char *path, char *buf, size_t size);
+}
+
+// The fonts' paths here are the runtime's (a mod's folder, the program's, WINDIR): in the ANSI code page on Windows,
+// where SDL and ImGui open files by UTF-8 ones (a mod folder named in Chinese would not open)
+static std::string utf8_path(const char *path) {
+    char buf[1400];
+    return plat_utf8_path(path, buf, sizeof buf);
 }
 
 static std::atomic<bool> g_enabled, g_ready, g_open, g_wants_text;
@@ -289,22 +314,24 @@ static void apply_input(ImGuiIO &io) {
     }
     // the controller (as Forge maps it: A activates, B cancels, the left stick and the d-pad move)
     if (!g_open) pad = {};
-    // Apply only to settings. Forge retains its existing semantic A/B mapping.
+    // Confirm and Cancel where the host menus have them (menu_confirm.h: the game's MenuConfirm binding, else
+    // [Controls] MenuConfirm), in the settings and in Forge's menu alike, so that one button confirms in both (#417).
+    // Only Forge's menu: what plugins read (forge_input_*) stays the game's own A and B.
     bool settings = g_settings_open && !g_forge_over;  // (the settings have the controller)
-    if (settings) {
+    int owner = settings ? 1 : g_forge_open ? 2 : 0;
+    int policy = owner ? menu_confirm_policy_now() : MENU_CONFIRM_ORIGINAL;
+    if (owner) {
         int a = overlay_face_position(0), b = overlay_face_position(1);
         int confirm, cancel;
-        menu_confirm_buttons(menu_confirm_policy_now(), a, b, pad.a, pad.b, &confirm, &cancel);
+        menu_confirm_buttons(policy, a, b, pad.a, pad.b, &confirm, &cancel);
         pad.a = confirm; pad.b = cancel;
     }
     // A or B held from the menu that had the controller (the settings' row that opened Forge's menu, Cancel that
     // closed it) does nothing in the next one until let go: as the host reads the controller, not as the clear left it
     static int last_policy = -1, was_owner;
     static bool wait_release;
-    int owner = settings ? 1 : g_forge_open ? 2 : 0;
     if (owner && owner != was_owner) wait_release = true;
     was_owner = owner;
-    int policy = settings ? menu_confirm_policy_now() : MENU_CONFIRM_ORIGINAL;
     if (last_policy >= 0 && policy != last_policy) wait_release = true;
     last_policy = policy;
     if (wait_release) {
@@ -405,19 +432,21 @@ static void forge_style(ImGuiStyle &style) {  // Forge's own (source/forge/graph
 
 // The font the menus draw with (ImGui's default), which the glyphs of a translation are merged into
 static ImFont *g_ui_font;
-static std::string g_ui_cjk;  // the Chinese font merged into g_ui_font ("": none)
-static bool g_ui_kr;          // the release's Korean font was merged into g_ui_font
+static std::string g_ui_cjk;  // a mod's MHGU-CJK.ttf merged into g_ui_font ("": none)
+static bool g_ui_release;     // the release's mhgurecomp-cjk.otf was merged into g_ui_font
 static bool g_han_tried;      // the system's Chinese glyphs were merged into g_ui_font, or no font for them was found
 static bool g_hangul_tried;   // the Korean glyphs were merged into g_ui_font, or no font for them was found
 
-static bool can_read(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (f) fclose(f);
-    return f != NULL;
+static bool can_read(const char *path) {  // (an absolute path; SDL: UTF-8 on Windows too)
+    SDL_IOStream *io = SDL_IOFromFile(utf8_path(path).c_str(), "rb");
+    if (io) SDL_CloseIO(io);
+    return io != NULL;
 }
 
 // A file beside the program (the release's fonts): the game's folder is not always the program's (MHGU_HOME, a game
-// folder given on the command line), so not a path relative to the current one.
+// folder given on the command line), so not a path relative to the current one. (Not on Android: the program there is
+// the system's app_process.)
+#ifndef __ANDROID__
 static std::string beside_program(const char *name) {
     char exe[1024];
     if (!plat_exe_path(exe, sizeof exe)) return name;
@@ -427,24 +456,73 @@ static std::string beside_program(const char *name) {
     *s = 0;
     return std::string(exe) + "/" + name;
 }
+#endif
 
-// The release's glyphs for the translations (runtime/settings_locale.h), beside the program: mhgurecomp-cjk.otf
-// (Chinese, language 2: a subset of Noto Sans SC, 0.7 MB) and mhgurecomp-kr.otf (Korean, language 3: Noto Sans KR,
-// 0.4 MB), made by tools/subset_cjk_font.py. Merged from the start, the loading box included, so the Language list's
-// 中文 and 한국어 show in every language. ("": not there)
+// The release's glyphs beyond ImGui's font, beside the program: mhgurecomp-cjk.otf, a subset of Noto Sans CJK SC
+// (1.7 MB, made by tools/subset_cjk_font.py) with the translations' Chinese and Korean (runtime/settings_locale.h),
+// kana, and the arrows and shapes cheats and mods name buttons with. Merged from the start, the loading box included,
+// so the Language list's 中文 and 한국어 show in every language. On Android it is in the APK's assets (android/apk.mk):
+// the name alone, which font_file finds there. ("": not there)
 static std::string release_font(const char *name) {
+#ifdef __ANDROID__
+    SDL_IOStream *io = SDL_IOFromFile(name, "rb");  // (a relative path: the APK's assets)
+    if (io) SDL_CloseIO(io);
+    return io ? std::string(name) : std::string();
+#else
     std::string p = beside_program(name);
     return can_read(p.c_str()) ? p : std::string();
+#endif
 }
 
-// Merges a font's glyphs into the menus' font (font_no: the face in a .ttc)
+// A font file's bytes (SDL_free them), or NULL. (SDL_LoadFile: a UTF-8 path on Windows too.) On Android a path that
+// is not a file is looked for in the APK's assets (the release's fonts); SDL would look there first for a relative
+// path, and a mod's font path may be relative to the app's folder, so stdio comes first.
+static void *font_file(const char *path, size_t *n) {
+#ifndef __ANDROID__
+    return SDL_LoadFile(utf8_path(path).c_str(), n);
+#else
+    void *data = nullptr;
+    if (FILE *f = fopen(path, "rb")) {
+        long size = fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
+        if (size > 0 && fseek(f, 0, SEEK_SET) == 0 && (data = SDL_malloc((size_t)size)) &&
+            fread(data, 1, (size_t)size, f) != (size_t)size) {
+            SDL_free(data);
+            data = nullptr;
+        }
+        if (data) *n = (size_t)size;
+        fclose(f);
+    }
+    if (!data) data = SDL_LoadFile(path, n);
+    return data;
+#endif
+}
+
+// Merges a font's glyphs into the menus' font (font_no: the face in a .ttc). Read here rather than by ImGui (which
+// reads only files, not the APK's assets), and checked with stb_truetype first: ImGui stops the program on a font it
+// can't read (an assert, not an error), and some can't be: Android 13 and later have Noto Sans CJK as a variable font
+// (CFF2), which stb_truetype does not read, and a mod's MHGU-CJK.ttf may be anything.
 static bool font_merge(ImFont *into, const char *path, int font_no = 0) {
+    size_t n = 0;
+    void *file = font_file(path, &n);
+    if (!file) return false;
+    const unsigned char *data = (const unsigned char *)file;
+    int offset = n >= 12 ? font_check::stbtt_GetFontOffsetForIndex(data, font_no) : -1;
+    font_check::stbtt_fontinfo info;
+    bool readable = offset >= 0 && (size_t)offset < n && font_check::stbtt_InitFont(&info, data, offset);
+    if (!readable) {
+        LOG("[overlay] %s (face %d): not a font ImGui can read (a variable / CFF2 one?)\n", path, font_no);
+        SDL_free(file);
+        return false;
+    }
+    void *owned = IM_ALLOC(n);  // (the atlas keeps the file for the glyphs it loads later, and frees it with IM_FREE)
+    memcpy(owned, file, n);
+    SDL_free(file);
     ImFontConfig cfg;
     cfg.MergeMode = true;
     cfg.DstFont = into;
     cfg.FontNo = font_no;
     cfg.SizePixels = g_font_size;  // (the same size, so the menu's rows keep the height they have in English)
-    return ImGui::GetIO().Fonts->AddFontFromFileTTF(path, g_font_size, &cfg) != nullptr;
+    return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(owned, (int)n, g_font_size, &cfg) != nullptr;
 }
 
 struct FontFile {
@@ -466,8 +544,9 @@ static std::string windows_font(const char *name) {
 }
 #endif
 
-// The Chinese menu's glyphs when the release's font is not there (a build folder made without it, Android): the
-// system's own Chinese font (Microsoft YaHei on Windows, Noto Sans CJK on Android and most Linux desktops).
+// The Chinese menu's glyphs when the release's font is not there (a build folder made without it): the system's own
+// Chinese font (Microsoft YaHei on Windows, Noto Sans CJK on Android and most Linux desktops; Android 13's and later
+// is a variable font ImGui can't read, which font_merge leaves out).
 static FontFile han_font_find(void) {
     return system_font({
 #ifdef _WIN32
@@ -536,8 +615,8 @@ static void language_font_merge(int language) {
 
 // The context, ImGui's own font and Forge's style at 12 px: from the start (overlay_init_early), Forge's settings
 // once its config is read (overlay_init). (Under g_frame_lock: the loading screen may be drawing.)
-// cjk_font: a mod's Chinese font (NULL: the release's), merged into the menus' font for a translated menu. Returns
-// whether font_path loaded.
+// cjk_font: a mod's Chinese font (NULL: none), merged into the menus' font ahead of the release's, which still gives
+// what the mod's has not (Hangul, symbols). Returns whether font_path loaded.
 static bool context_init(const char *font_path, const char *cjk_font, float font_size) {
     if (!ImGui::GetCurrentContext()) {
         IMGUI_CHECKVERSION();
@@ -552,28 +631,27 @@ static bool context_init(const char *font_path, const char *cjk_font, float font
     g_font_size = font_size > 0 ? font_size : 12.0f;
     ImFontConfig cfg;
     cfg.SizePixels = g_font_size;
-    std::string cjk = cjk_font ? cjk_font : release_font("mhgurecomp-cjk.otf");
-    ImFont *font = font_path ? io.Fonts->AddFontFromFileTTF(font_path, g_font_size, &cfg) : nullptr;
+    std::string mod = cjk_font ? cjk_font : "";
+    ImFont *font = font_path ? io.Fonts->AddFontFromFileTTF(utf8_path(font_path).c_str(), g_font_size, &cfg) : nullptr;
     if (font) io.FontDefault = font;
-    // (ImGui's own; again when a mod's Chinese font comes after the release's was merged: the first source that has a
-    // glyph is the one drawn, so the mod's goes into a font of its own)
-    else if (io.Fonts->Fonts.Size == 0 || (!g_ui_cjk.empty() && g_ui_cjk != cjk))
+    // (ImGui's own; again when a mod's Chinese font comes after another was merged: the first source that has a glyph
+    // is the one drawn, so the mod's goes into a font of its own, ahead of the release's)
+    else if (io.Fonts->Fonts.Size == 0 || (!mod.empty() && g_ui_cjk != mod && (g_ui_release || !g_ui_cjk.empty())))
         io.FontDefault = io.Fonts->AddFontDefaultVector(&cfg);
     ImFont *ui = io.FontDefault ? io.FontDefault : io.Fonts->Fonts[0];
     if (ui != g_ui_font) {  // (a new font for the menus: the translations' glyphs merge into it again)
         g_ui_cjk.clear();
-        g_ui_kr = g_han_tried = g_hangul_tried = false;
+        g_ui_release = g_han_tried = g_hangul_tried = false;
     }
     g_ui_font = ui;
-    if (!cjk.empty() && g_ui_cjk.empty()) {
-        if (font_merge(ui, cjk.c_str())) g_ui_cjk = cjk;
-        else LOG("[overlay] Chinese glyphs: %s did not load\n", cjk.c_str());
+    if (!mod.empty() && g_ui_cjk.empty()) {
+        if (font_merge(ui, mod.c_str())) g_ui_cjk = mod;
+        else LOG("[overlay] Chinese glyphs: %s did not load\n", mod.c_str());
     }
-    // (after the Chinese one: a mod's MHGU-CJK.ttf with Hangul wins over it too)
-    std::string kr = g_ui_kr ? std::string() : release_font("mhgurecomp-kr.otf");
-    if (!kr.empty()) {
-        if (font_merge(ui, kr.c_str())) g_ui_kr = true;
-        else LOG("[overlay] Korean glyphs: %s did not load\n", kr.c_str());
+    std::string release = g_ui_release ? std::string() : release_font("mhgurecomp-cjk.otf");
+    if (!release.empty()) {
+        if (font_merge(ui, release.c_str())) g_ui_release = true;
+        else LOG("[overlay] CJK glyphs: %s did not load\n", release.c_str());
     }
     ImGuiStyle style;
     ImGui::StyleColorsDark(&style);
@@ -600,9 +678,9 @@ void overlay_init(const char *font_path, const char *cjk_font, float font_size, 
     bool font = context_init(font_path, cjk_font, font_size);
     g_menu_key = menu_key;
     g_enabled = true;
-    LOG("[forge] ImGui %s overlay: %s opens the menu (font %s, %.0f px; Chinese glyphs %s; Korean glyphs %s)\n",
+    LOG("[forge] ImGui %s overlay: %s opens the menu (font %s, %.0f px; mod's Chinese glyphs %s; CJK glyphs %s)\n",
         IMGUI_VERSION, SDL_GetScancodeName((SDL_Scancode)menu_key), font ? font_path : "ImGui's", g_font_size,
-        g_ui_cjk.empty() ? "none" : g_ui_cjk.c_str(), g_ui_kr ? "the release's" : "none yet");
+        g_ui_cjk.empty() ? "none" : g_ui_cjk.c_str(), g_ui_release ? "the release's" : "none");
 }
 
 // ------------------------------------------------------------------ notices (any thread -> game thread)
@@ -1132,6 +1210,109 @@ static void loading_frame(VkCommandBuffer cb, const OverlayTarget *t) {
 }
 #endif
 
+// ------------------------------------------------------------------ plugins' own textures (Forge 2.0.0)
+// forge_graphics_registerTexture(texture, view): an NVNtexture (the plugin's or the game's) for ImGui::Image. Forge
+// puts it in its NVN backend's texture pool and hands out the texture handle. Here the plugin gets a tag (USER_TEX_TAG
+// | slot), the texture's Vulkan view is looked up each frame the game presents (device.c, outside the render pass:
+// the image is made current there, uploaded or resolved), and the overlay's draw turns the tag into an ImGui Vulkan
+// descriptor set for that view (a new one when the view changes; the old set is freed frames later, as are the sets
+// of unregistered textures). The view is read at registration, as Forge's pool does. A tag with no view this frame
+// (a texture finalized before it was unregistered) draws nothing.
+#define USER_TEX_MAX 256
+#define USER_TEX_TAG 0x7E57000000000000ull
+#define USER_TEX_TAG_MASK 0xFFFF000000000000ull
+#define USER_TEX_FREE_AFTER 10  // presents (the backend's ImageCount is 8)
+struct UserTex {
+    bool live;
+    uint32_t tex;               // guest NVNtexture *
+    bool has_view;
+    uint8_t view[0x28];         // its NVNtextureView, as registered
+    VkImageView vk;             // this frame's (overlay_user_textures_prepare)
+    VkImageView set_view;       // what set was made for
+    VkDescriptorSet set;
+};
+static std::mutex g_user_tex_lock;
+static UserTex g_user_tex[USER_TEX_MAX];
+struct DeadSet { VkDescriptorSet set; uint64_t at; };
+static std::vector<DeadSet> g_dead_sets;  // (under g_user_tex_lock)
+static uint64_t g_draws;                   // overlay_draw calls
+
+extern "C" uint64_t overlay_user_texture_add(uint32_t tex, const void *view) {
+    std::lock_guard<std::mutex> l(g_user_tex_lock);
+    for (int i = 0; i < USER_TEX_MAX; i++) {
+        UserTex &u = g_user_tex[i];
+        if (u.live) continue;
+        u = UserTex{};
+        u.live = true;
+        u.tex = tex;
+        u.has_view = view != nullptr;
+        if (view) memcpy(u.view, view, sizeof u.view);
+        return USER_TEX_TAG | (uint64_t)(i + 1);
+    }
+    return 0;
+}
+
+static UserTex *user_tex_of(uint64_t id) {
+    if ((id & USER_TEX_TAG_MASK) != USER_TEX_TAG) return nullptr;
+    uint64_t i = (id & ~USER_TEX_TAG_MASK) - 1;
+    return i < USER_TEX_MAX && g_user_tex[i].live ? &g_user_tex[i] : nullptr;
+}
+
+extern "C" bool overlay_user_texture_remove(uint64_t id) {
+    std::lock_guard<std::mutex> l(g_user_tex_lock);
+    UserTex *u = user_tex_of(id);
+    if (!u) return false;
+    u->live = false;
+    u->vk = VK_NULL_HANDLE;
+    if (u->set) g_dead_sets.push_back({u->set, g_draws});
+    u->set = VK_NULL_HANDLE;
+    return true;
+}
+
+extern "C" void overlay_user_textures_prepare(VkImageView (*view_of)(uint32_t tex, const void *view)) {
+    std::lock_guard<std::mutex> l(g_user_tex_lock);
+    for (UserTex &u : g_user_tex)
+        if (u.live) u.vk = view_of(u.tex, u.has_view ? u.view : nullptr);
+}
+
+#ifndef MHGU_NULL_BACKEND
+// (render thread, under the Vulkan lock and g_user_tex_lock) Sets for this frame's views; sets nothing draws any more
+// freed once the frames that may have drawn them are done
+static void user_tex_sets(void) {
+    g_draws++;
+    for (UserTex &u : g_user_tex) {
+        if (!u.live || !u.vk || u.vk == u.set_view) continue;
+        if (u.set) g_dead_sets.push_back({u.set, g_draws});
+        u.set = ImGui_ImplVulkan_AddTexture(VK_NULL_HANDLE, u.vk, VK_IMAGE_LAYOUT_GENERAL);  // (the renderer's images stay GENERAL)
+        u.set_view = u.set ? u.vk : VK_NULL_HANDLE;
+    }
+    size_t k = 0;
+    for (DeadSet &d : g_dead_sets) {
+        if (g_draws - d.at > USER_TEX_FREE_AFTER) ImGui_ImplVulkan_RemoveTexture(d.set);
+        else g_dead_sets[k++] = d;
+    }
+    g_dead_sets.resize(k);
+}
+
+// g_snap drawn with the plugins' texture tags as their sets (put back after: the copy may be drawn again)
+static void draw_snap(VkCommandBuffer cb) {
+    std::lock_guard<std::mutex> lt(g_user_tex_lock);
+    user_tex_sets();
+    struct Patched { ImDrawCmd *cmd; ImTextureID id; ImVec4 clip; };
+    std::vector<Patched> patched;
+    for (ImDrawList *list : g_snap.CmdLists)
+        for (ImDrawCmd &cmd : list->CmdBuffer) {
+            if (cmd.UserCallback || cmd.TexRef._TexData || (cmd.TexRef._TexID & USER_TEX_TAG_MASK) != USER_TEX_TAG) continue;
+            patched.push_back({&cmd, cmd.TexRef._TexID, cmd.ClipRect});
+            UserTex *u = user_tex_of(cmd.TexRef._TexID);
+            if (u && u->set && u->vk) cmd.TexRef._TexID = (ImTextureID)(uintptr_t)u->set;
+            else cmd.ClipRect = ImVec4(0, 0, 0, 0);  // (the backend skips an empty clip before it binds anything)
+        }
+    ImGui_ImplVulkan_RenderDrawData(&g_snap, cb);
+    for (Patched &p : patched) p.cmd->TexRef._TexID = p.id, p.cmd->ClipRect = p.clip;
+}
+#endif
+
 // (render thread) The game's overlay frame; before the game's thread has made one (its first frame or two), the
 // loading indicator as the loading screen draws it, so it doesn't blink out.
 void overlay_draw(VkCommandBuffer cb, const OverlayTarget *t) {
@@ -1145,7 +1326,7 @@ void overlay_draw(VkCommandBuffer cb, const OverlayTarget *t) {
         }
     }
     std::lock_guard<std::mutex> l(g_snap_lock);
-    if (g_snap.Valid && g_snap.CmdListsCount) ImGui_ImplVulkan_RenderDrawData(&g_snap, cb);
+    if (g_snap.Valid && g_snap.CmdListsCount) draw_snap(cb);
 #endif
 }
 

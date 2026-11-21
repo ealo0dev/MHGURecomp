@@ -33,8 +33,10 @@
 #include <thread>
 #include <vector>
 
+extern "C" const char *plat_utf8_path(const char *path, char *buf, size_t size);  // (runtime/platform.h)
+
 namespace {
-enum class View { Main, Keyboard, CloseChanges, Exit, Restart, Reset, Move, Conflicts, KeyCapture, Keybinds, Actions };
+enum class View { Main, Keyboard, CloseChanges, Exit, Restart, Reset, Move, Conflicts, KeyCapture, Keybinds, Actions, Changelog };
 enum class Command { None, Save };
 struct Row {
     std::string id, title, value;
@@ -245,6 +247,13 @@ int mod_index(const std::string &name) {
             return i;
     return -1;
 }
+// A mod's name as the menu shows it. The name is its folder's, as readdir gives it - in the ANSI code page on Windows
+// (GBK on a Chinese one), where ImGui reads UTF-8 (a name in Chinese was ???) - and also the folder the mod loads from,
+// so ModEntry keeps it as it is.
+std::string mod_title(const std::string &name) {
+    char buf[512];
+    return plat_utf8_path(name.c_str(), buf, sizeof buf);
+}
 bool dirty();
 // The tab that shows the build's version (MHGU_VERSION, the Makefile's VERSION) in the bottom right corner
 constexpr int VERSION_PAGE = APP_PAGE;
@@ -387,7 +396,14 @@ bool equal(const Config &a, const Config &b) {
     SAME(sync_small_monsters);
     SAME(lag_compensation);
     SAME(ldn_direct);
+    SAME(ldn_ryu_serve);
+    SAME(ldn_ryu_serve_port);
+    SAME(ldn_room_serve);
+    SAME(ldn_room_serve_port);
+    SAME(ldn_room_host);
     SAME(bonus_content);
+    SAME(backups_on);
+    SAME(save_backups);
     SAME(village_in_hub);
     SAME(quest_hold_send);
     SAME(share_urgent);
@@ -415,6 +431,7 @@ bool equal(const Config &a, const Config &b) {
     SAME(confirm_exit);
     SAME(show_fps);
     SAME(menu_chord);
+    SAME(title_back_exit);
     SAME(show_battery);
     SAME(updates);
     SAME(hp.village);
@@ -423,7 +440,12 @@ bool equal(const Config &a, const Config &b) {
     if (memcmp(a.binds, b.binds, sizeof a.binds))
         return false;
     if (strcmp(a.ldn_join, b.ldn_join) || strcmp(a.ldn_server, b.ldn_server) || strcmp(a.ldn_key, b.ldn_key) ||
-        strcmp(a.chat_key, b.chat_key) || strcmp(a.save_dir, b.save_dir) || strcmp(a.save_location, b.save_location) || strcmp(a.game_dir, b.game_dir))
+        strcmp(a.chat_key, b.chat_key) || strcmp(a.save_dir, b.save_dir) || strcmp(a.save_location, b.save_location) || strcmp(a.backup_location, b.backup_location) || strcmp(a.game_dir, b.game_dir))
+        return false;
+    if (strcmp(a.ldn_ryu_servers, b.ldn_ryu_servers) || strcmp(a.ldn_ryu_host, b.ldn_ryu_host) ||
+        strcmp(a.ldn_ryu_pass, b.ldn_ryu_pass) || strcmp(a.ldn_room_server, b.ldn_room_server) ||
+        strcmp(a.ldn_room_pass, b.ldn_room_pass) || strcmp(a.ldn_room_nick, b.ldn_room_nick) ||
+        strcmp(a.audio_device, b.audio_device))
         return false;
     for (int n = 0; n < 4; ++n)
         if (a.hp.scale[n] != b.hp.scale[n])
@@ -693,6 +715,73 @@ void action(std::vector<Row> &rows, const std::string &id, const std::string &na
     r.activate = std::move(fn);
     r.enabled = enabled;
     rows.push_back(std::move(r));
+}
+// This version's release notes (Application: What's new): update/changelog.txt, which the updater writes when it installs
+// a release (updater/updater.c save_changelog), as plain text after the version on its first line. Empty: there are
+// none, or they are another version's (a release installed by hand). Read once: only the updater changes the file.
+const std::string &changelog() {
+    static std::string notes;
+    static bool read = false;
+    if (!read) {
+        read = true;
+        size_t n = 0;
+        char *data = (char *)SDL_LoadFile("update/changelog.txt", &n);
+        if (data) {
+            std::string all(data, n);
+            SDL_free(data);
+            size_t nl = all.find('\n');
+            std::string version = all.substr(0, nl);
+            if (!version.empty() && version.back() == '\r')
+                version.pop_back();
+            if (nl != std::string::npos && version == MHGU_VERSION)
+                notes = all.substr(nl + 1);
+        }
+    }
+    return notes;
+}
+// The notes in a box under the view's title, at most room high: it scrolls with the mouse wheel, up / down (the D-pad,
+// the left stick, the arrow keys) and Page Up / Page Down. "- " lines are bullets, indented by their leading spaces.
+void changelog_box(float room) {
+    const std::string &notes = changelog();
+    float font = ImGui::GetFontSize();
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, std::max(room, font * 6)));
+    if (ImGui::BeginChild("##changelog", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY, ImGuiWindowFlags_NoNav)) {
+        for (size_t i = 0; i < notes.size();) {
+            size_t j = notes.find('\n', i);
+            if (j == std::string::npos)
+                j = notes.size();
+            std::string line = notes.substr(i, j - i);
+            i = j + 1;
+            size_t lead = line.find_first_not_of(" \t");
+            if (lead == std::string::npos) {
+                ImGui::Dummy(ImVec2(1, font * .4f));
+                continue;
+            }
+            int spaces = 0;
+            for (size_t k = 0; k < lead; ++k)
+                spaces += line[k] == '\t' ? 4 : 1;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (spaces + 2) / 4 * font * 1.5f);
+            if (!line.compare(lead, 2, "- ")) {
+                ImGui::Bullet();  // (it stays on the line: the text wraps under its own first word)
+                ImGui::TextWrapped("%s", line.c_str() + lead + 2);
+            } else
+                ImGui::TextWrapped("%s", line.c_str() + lead);
+        }
+        float dy = 0, step = font * 25 * ImGui::GetIO().DeltaTime;
+        if (ImGui::IsKeyDown(ImGuiKey_DownArrow) || ImGui::IsKeyDown(ImGuiKey_GamepadDpadDown) ||
+            ImGui::IsKeyDown(ImGuiKey_GamepadLStickDown))
+            dy += step;
+        if (ImGui::IsKeyDown(ImGuiKey_UpArrow) || ImGui::IsKeyDown(ImGuiKey_GamepadDpadUp) ||
+            ImGui::IsKeyDown(ImGuiKey_GamepadLStickUp))
+            dy -= step;
+        if (ImGui::IsKeyPressed(ImGuiKey_PageDown))
+            dy += ImGui::GetWindowHeight() * .9f;
+        if (ImGui::IsKeyPressed(ImGuiKey_PageUp))
+            dy -= ImGui::GetWindowHeight() * .9f;
+        if (dy)
+            ImGui::SetScrollY(std::clamp(ImGui::GetScrollY() + dy, 0.f, ImGui::GetScrollMaxY()));
+    }
+    ImGui::EndChild();
 }
 // A text setting (a char array of the draft, size bytes) typed on the on-screen keyboard; shown: its row's value
 void text(std::vector<Row> &rows, const char *id, const char *name, char *field, size_t size, const std::string &shown,
@@ -980,7 +1069,7 @@ const char *scheme_name(int dev) { return tr(dev == 0 ? "Controller" : "Keyboard
 const char *action_note(int id) {
     switch (id) {
     case ACT_CROUCH:
-        return "B while the hunter stands still. Give it an input of its own and it is told apart from the roll: with the weapon away it works only standing still and Dodge only while moving. It cannot share an input with Interact.";
+        return "B while the hunter stands still with the weapon away (the only time a hunter can crouch). Give it an input of its own and it is told apart from the roll: it works only standing still and Dodge only while moving. It may share an input with Attack A, never with Interact.";
     case ACT_DODGE:
         return "With Crouch bound, or Dodge and Interact on one input, Dodge works only while moving when the weapon is away (the roll); weapon B-actions with the weapon out are as before.";
     case ACT_INTERACT:
@@ -993,10 +1082,11 @@ const char *action_note(int id) {
     }
 }
 // Two actions of one context on one input by design (not a conflict): Interact with Dodge, Crouch with Dodge (the game's
-// own B), AttackA with Interact; the item bar's two actions are a state of their own
+// own B), AttackA with Interact or Crouch (weapon out / weapon away); the item bar's two actions are a state of their own
 bool shares_by_design(int a, int b, bool sheathed_attack) {
     auto pair = [&](int x, int y) { return (a == x && b == y) || (a == y && b == x); };
-    if (pair(ACT_INTERACT, ACT_DODGE) || pair(ACT_CROUCH, ACT_DODGE) || (!sheathed_attack && pair(ACT_ATTACK_A, ACT_INTERACT)))
+    if (pair(ACT_INTERACT, ACT_DODGE) || pair(ACT_CROUCH, ACT_DODGE) ||
+        (!sheathed_attack && (pair(ACT_ATTACK_A, ACT_INTERACT) || pair(ACT_ATTACK_A, ACT_CROUCH))))
         return true;
     bool bar_a = a == ACT_ITEMBAR_RIGHT || a == ACT_ITEMBAR_LEFT, bar_b = b == ACT_ITEMBAR_RIGHT || b == ACT_ITEMBAR_LEFT;
     return (bar_a || bar_b) && !(bar_a && bar_b);
@@ -1265,6 +1355,33 @@ void action_rows(std::vector<Row> &r) {
             names.push_back(tr(d.label));
         add_choice(r, "act.tab", "Show", a.tab, names, [](int v) { acts().tab = v; });
         r.back().help = tr("What the list and the drawing show: one part of the game at a time. L1 / R1 on a controller go through them. Keys: the keys that are not actions (movement, the item bar, chat).");
+    }
+    if (kind == TAB_HUNT)
+        toggle("act.arts", "Hunter Art keys", &p.art_keys,
+               "On: each Hunter Art has an input of its own (keyboard: 1, 2 and 3 unless rebound below), whatever buttons the game's Control Type gives them; those keep working too. With a Control Type that puts the Arts on the D-pad, the HUD shows these keys for them on keyboard and mouse.");
+    if (kind == TAB_HUNT) {
+        // the categories OpenTalk is for: a comma list, read off log.txt with Target log on
+        char list[160];
+        act_format_targets(p.confirm_mask, list, sizeof list);
+        Row row;
+        row.id = "act.targets";
+        row.title = tr("Open / talk targets");
+        row.value = list[0] ? list : tr("None");
+        row.help = tr("The interactable categories the Open / talk action opens or talks to, by number. Only used once Open / talk has an input of its own. With Target log on, walk up to each kind once and read its number in log.txt. Empty: Open / talk never presses anything.");
+        row.activate = [list = std::string(list)]() {
+            keyboard(tr("Open / talk targets"), list, 120, [](const std::string &typed, std::string &error) {
+                uint64_t mask = 0;
+                if (!act_parse_targets(typed.c_str(), &mask)) {
+                    error = tr("Numbers from 1 to 63, separated by commas.");
+                    return false;
+                }
+                acts().draft.confirm_mask = mask;
+                return true;
+            });
+        };
+        r.push_back(std::move(row));
+        toggle("act.targetlog", "Target log", &p.target_log,
+               "On: one line per change of the interactable's category in log.txt, for filling the list above in: walk up to each kind once. Off: nothing is written.");
     }
     if (kind == TAB_KEYS)
         key_rows(r);
@@ -1694,12 +1811,14 @@ void reset_section() {
         c.volume = f.volume;
         c.mute_in_background = f.mute_in_background;
         c.audio_output = f.audio_output;
+        SDL_strlcpy(c.audio_device, f.audio_device, sizeof c.audio_device);
         break;
     case 2:
         c.face_buttons = f.face_buttons;
         c.background_input = f.background_input;
         c.kbm_prompts = f.kbm_prompts;
         c.menu_chord = f.menu_chord;
+        c.title_back_exit = f.title_back_exit;
         c.combo_window = f.combo_window;
         c.mouse_sensitivity = f.mouse_sensitivity;
         c.mouse_sensitivity_y = f.mouse_sensitivity_y;
@@ -1716,6 +1835,17 @@ void reset_section() {
         SDL_strlcpy(c.ldn_server, f.ldn_server, sizeof c.ldn_server);
         SDL_strlcpy(c.ldn_key, f.ldn_key, sizeof c.ldn_key);
         c.ldn_direct = f.ldn_direct;
+        c.ldn_ryu_serve = f.ldn_ryu_serve;
+        c.ldn_ryu_serve_port = f.ldn_ryu_serve_port;
+        c.ldn_room_serve = f.ldn_room_serve;
+        c.ldn_room_serve_port = f.ldn_room_serve_port;
+        c.ldn_room_host = f.ldn_room_host;
+        SDL_strlcpy(c.ldn_ryu_servers, f.ldn_ryu_servers, sizeof c.ldn_ryu_servers);
+        SDL_strlcpy(c.ldn_ryu_host, f.ldn_ryu_host, sizeof c.ldn_ryu_host);
+        SDL_strlcpy(c.ldn_ryu_pass, f.ldn_ryu_pass, sizeof c.ldn_ryu_pass);
+        SDL_strlcpy(c.ldn_room_server, f.ldn_room_server, sizeof c.ldn_room_server);
+        SDL_strlcpy(c.ldn_room_pass, f.ldn_room_pass, sizeof c.ldn_room_pass);
+        SDL_strlcpy(c.ldn_room_nick, f.ldn_room_nick, sizeof c.ldn_room_nick);
         break;
     case 4:
         c.sync_small_monsters = f.sync_small_monsters;
@@ -1739,6 +1869,8 @@ void reset_section() {
 #ifdef __ANDROID__
     case ANDROID_PAGE:
         SDL_strlcpy(c.save_dir, f.save_dir, sizeof c.save_dir);
+        c.backups_on = f.backups_on;
+        c.save_backups = f.save_backups;
         SDL_strlcpy(c.game_dir, f.game_dir, sizeof c.game_dir);
         break;
 #endif
@@ -1748,6 +1880,11 @@ void reset_section() {
         c.menu_scale = f.menu_scale;
         c.menu_confirm = f.menu_confirm;
         SDL_strlcpy(c.save_location, f.save_location, sizeof c.save_location);
+#ifndef __ANDROID__  // (Android: on its own tab)
+        c.backups_on = f.backups_on;
+        c.save_backups = f.save_backups;
+#endif
+        SDL_strlcpy(c.backup_location, f.backup_location, sizeof c.backup_location);
         c.button_icons = f.button_icons;
         c.confirm_exit = f.confirm_exit;
         c.updates = f.updates;
@@ -1805,17 +1942,18 @@ void conflict_rows(std::vector<Row> &r) {
             continue;
         if (ia > ib)
             std::swap(ia, ib);
-        const char *first = mods.draft[ia].name, *second = mods.draft[ib].name;
-        std::string text = fmt("%s and %s both change %d file(s); %s is used", first, second, c.replaced, second);
-        std::string a = first, b = second;
+        std::string a = mods.draft[ia].name, b = mods.draft[ib].name;
+        std::string first = mod_title(a), second = mod_title(b);
+        std::string text = fmt("%s and %s both change %d file(s); %s is used", first.c_str(), second.c_str(), c.replaced,
+                               second.c_str());
         action(r, "mods.conflict." + std::to_string(k), text, []() {});
         {  // select it to choose which of the two is used: that one moves below the other
             Row &row = r.back();
             Row copy = row;
             copy.title = tr("Which mod is used?");
             row.menu = true;
-            row.activate = [copy, a, b]() {
-                choices(copy, {fmt("Use %s", a.c_str()), fmt("Use %s", b.c_str())}, 1, [a, b](int v) {
+            row.activate = [copy, a, b, first, second]() {
+                choices(copy, {fmt("Use %s", first.c_str()), fmt("Use %s", second.c_str())}, 1, [a, b](int v) {
                     int ia = mod_index(a), ib = mod_index(b), win = v ? ib : ia, lose = v ? ia : ib;
                     if (ia < 0 || ib < 0 || win > lose)
                         return;
@@ -1892,7 +2030,7 @@ void mods_rows(std::vector<Row> &r) {
             }
         Row row;
         row.id = "mod." + name;
-        row.title = name;
+        row.title = mod_title(name);
         row.value = std::string(tr(on ? "On" : "Off")) + (clash ? " !" : "");
         row.cold = true;
         auto set_on = [name](bool v) {
@@ -1972,6 +2110,26 @@ void mods_rows(std::vector<Row> &r) {
     action(r, "mods.forge", tr("Open the Forge menu"), []() { forge_requested = true; }, plugins);
     r.back().help = tr("The Forge plugins' own settings, over this menu. Cancel (the button that goes back in the game's menus) or Start + Back closes it and comes back here. On a keyboard the Forge menu key (Insert) opens and closes it.");
 }
+// The playback devices plugged in now, by the names [Audio] Device keeps (looked up once a second: the rows are
+// rebuilt every frame). Left out: a name the file couldn't hold or read back.
+std::vector<std::string> playback_devices() {
+    static std::vector<std::string> list;
+    static Uint64 when;
+    if (when && SDL_GetTicks() - when < 1000)
+        return list;
+    when = SDL_GetTicks();
+    list.clear();
+    int n = 0;
+    SDL_AudioDeviceID *ids = SDL_GetAudioPlaybackDevices(&n);  // (none before the game opens its audio)
+    for (int i = 0; ids && i < n; ++i) {
+        const char *name = SDL_GetAudioDeviceName(ids[i]);
+        if (name && *name && strlen(name) < sizeof s.draft.audio_device && !strpbrk(name, "\r\n;#") &&
+            SDL_strcasecmp(name, "Default") && std::find(list.begin(), list.end(), name) == list.end())
+            list.push_back(name);
+    }
+    SDL_free(ids);
+    return list;
+}
 std::vector<Row> main_rows() {
     std::vector<Row> r;
     Config &c = s.draft;
@@ -2021,6 +2179,26 @@ std::vector<Row> main_rows() {
         add_choice(r, "audio.output", "Output", c.audio_output, {tr("Stereo"), tr("5.1 surround")},
                    [](int v) { c.audio_output = v; }, ini("Output"));
         r.back().help = tr("5.1 surround sends the game's own 5.1 mix (front, center, subwoofer, rear) to a surround system; Stereo folds it down to two speakers or headphones. With 5.1 on a stereo device, the system folds it down instead.");
+        {  // [Audio] Device: Default, the devices plugged in now, and the chosen one also while it isn't
+            std::vector<std::string> devs = playback_devices();
+            const char *now = SDL_GetAudioDeviceName(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK);
+            std::vector<std::string> names{now && *now ? std::string(tr("Default")) + " (" + now + ")" : tr("Default")};
+            for (const std::string &d : devs)
+                names.push_back(d);
+            int sel = 0;
+            if (*c.audio_device && SDL_strcasecmp(c.audio_device, "Default")) {
+                auto it = std::find(devs.begin(), devs.end(), std::string(c.audio_device));
+                sel = 1 + (int)(it - devs.begin());
+                if (it == devs.end()) {
+                    devs.push_back(c.audio_device);
+                    names.push_back(std::string(c.audio_device) + " (" + tr("not plugged in") + ")");
+                }
+            }
+            add_choice(r, "audio.device", "Device", sel, names,
+                       [devs](int v) { SDL_strlcpy(c.audio_device, v > 0 ? devs[v - 1].c_str() : "", sizeof c.audio_device); },
+                       ini("Device"));
+            r.back().help = tr("Where the game's sound plays. Default follows the system's default device, also when it changes while the game runs. A device chosen here is always used: while it is unplugged there is no sound, and it comes back when the device does.");
+        }
         header(r, "graphics.header", tr("Graphics"));
         add_bool(r, "show.fps", "FPS counter", &c.show_fps, ini("ShowFPS"));
 #ifdef __ANDROID__
@@ -2152,6 +2330,8 @@ std::vector<Row> main_rows() {
         r.back().help = tr("Rebind the game itself: every action of a hunt, of the town and of the menus on the controller button, key or mouse button you choose, also per weapon, with the controller or the keyboard drawn beside the list. The keys for moving, the item bar and chat are there too (Keys). Off by default.");
         add_bool(r, "menu.chord", "Plus + Minus opens this menu", &c.menu_chord, ini("MenuChord"));
         r.back().help = tr("Pressing Plus and Minus together (Start + Back on a controller) opens this menu. Turn it off to keep that combination for the game or a cheat, for example when you play with a keyboard and mouse. F1 still opens the menu.");
+        add_bool(r, "title.back", "Back on the Main Menu asks to quit", &c.title_back_exit, ini("TitleBackExit"));
+        r.back().help = tr("Pressing Back on the title screen's Main Menu asks whether to quit the game. Turn it off if a mod swaps the menus' Confirm and Back, so that confirming there no longer asks. Closing the window still asks.");
         break;
     case 3:
         number(r, "port", "Host port (TCP / UDP)", &c.ldn_port, (int)lo("Port"), (int)hi("Port"), 1, ini("Port"));
@@ -2168,6 +2348,43 @@ std::vector<Row> main_rows() {
         hub_check(r);
         add_bool(r, "direct", "Direct connections", &c.ldn_direct, ini("Direct"));
         r.back().help = tr("In an internet hub, your game and the host's send their packets straight to each other when both routers let them, for a lower ping; else through the hub server. The other player's game then sees your IP address. Off: always through the hub server.");
+        // (all of them take effect at the next start: config.c marks them restart)
+        header(r, "crossplay.header", tr("Emulator Crossplay"));
+        add_bool(r, "ryu.serve", "Host for Ryujinx players", &c.ldn_ryu_serve, ini("RyuServe"));
+        r.back().help = tr("While local play is open, this game runs a Ryujinx LDN server itself. Ryujinx and Ryubing players set their LDN server to this PC's address and the port below, then search for hubs in Local Play. Hubs you create are made on it. For the internet, forward the port (TCP) or use a VPN such as Radmin.");
+        if (c.ldn_ryu_serve) {
+            number(r, "ryu.serve.port", "Ryujinx server port (TCP)", &c.ldn_ryu_serve_port, 1, (int)hi("RyuServePort"), 1,
+                   ini("RyuServePort"));
+            r.back().help = tr("The port Ryujinx players connect to. Default: 30456, the one Ryujinx's own LDN server uses.");
+        }
+        add_bool(r, "room.serve", "Host for suyu / Eden / Citron players", &c.ldn_room_serve, ini("RoomServe"));
+        r.back().help = tr("While local play is open, this game runs a multiplayer room itself. suyu, yuzu, Eden and Citron players join a room at this PC's address and the port below, with the room password if there is one. Hubs you create are shared with the room, and with Ryujinx players too when both are on. For the internet, forward the port (UDP) or use a VPN.");
+        if (c.ldn_room_serve) {
+            number(r, "room.serve.port", "Room port (UDP)", &c.ldn_room_serve_port, 1, (int)hi("RoomServePort"), 1,
+                   ini("RoomServePort"));
+            r.back().help = tr("The port room players connect to. Default: 24872, the multiplayer rooms' usual port.");
+        }
+        text(r, "room.pass", "Room password", c.ldn_room_pass, sizeof c.ldn_room_pass,
+             *c.ldn_room_pass ? std::string(strlen(c.ldn_room_pass), '*') : std::string(tr("None")), ini("RoomPassword"));
+        r.back().help = tr("The password of the room this game hosts, or of the room server below that it joins. Empty: no password.");
+        text(r, "ryu.pass", "Ryujinx passphrase", c.ldn_ryu_pass, sizeof c.ldn_ryu_pass,
+             *c.ldn_ryu_pass ? c.ldn_ryu_pass : tr("Public"), ini("RyuPassphrase"));
+        r.back().help = tr("For a private group with Ryujinx players: Ryujinx- followed by exactly 8 hex digits (for example Ryujinx-1a2b3c4d), the same one the Ryujinx players enter. Anything else, a typo too, counts as none: your lobbies are public.");
+        text(r, "ryu.servers", "Ryujinx servers to search", c.ldn_ryu_servers, sizeof c.ldn_ryu_servers,
+             *c.ldn_ryu_servers ? c.ldn_ryu_servers : tr("None"), ini("RyuServers"));
+        r.back().help = tr("Ryujinx LDN servers whose hubs show up in Search Hubs, as host or host:port (default port 30456), separated by commas. To join a player on this port who hosts with Ryujinx players, enter their address. Please don't use Ryujinx's own public server.");
+        text(r, "ryu.host", "Ryujinx server for your hubs", c.ldn_ryu_host, sizeof c.ldn_ryu_host,
+             *c.ldn_ryu_host ? std::string(c.ldn_ryu_host) : std::string(tr(c.ldn_ryu_serve ? "This PC" : "None")),
+             ini("RyuHost"));
+        r.back().help = tr("A Ryujinx LDN server that hubs you create are made on, so Ryujinx players on it can join them. Not needed when this game hosts for Ryujinx players itself.");
+        text(r, "room.server", "Room server", c.ldn_room_server, sizeof c.ldn_room_server,
+             *c.ldn_room_server ? c.ldn_room_server : tr("None"), ini("RoomServer"));
+        r.back().help = tr("A suyu-style multiplayer room (host or host:port, default port 24872) this game joins while local play is open: the emulator players' hubs show up in Search Hubs.");
+        add_bool(r, "room.host", "Host hubs in the room", &c.ldn_room_host, ini("RoomHost"));
+        r.back().help = tr("Hubs you create live in the room server above, so its players can search and join them. Not needed when this game hosts the room itself.");
+        text(r, "room.name", "Name in the room", c.ldn_room_nick, sizeof c.ldn_room_nick,
+             *c.ldn_room_nick ? c.ldn_room_nick : "MHGU Player", ini("RoomName"));
+        r.back().help = tr("Your name in the room server above.");
         header(r, "discord.header", "Discord");
         add_bool(r, "discord", "Discord Rich Presence", &c.discord, ini("RichPresence"));
         add_bool(r, "discord.hunter", "Show hunter name and HR", &c.discord_hunter, ini("ShowHunter"));
@@ -2284,6 +2501,10 @@ std::vector<Row> main_rows() {
         add_bool(r, "confirm.exit", "Confirm exit", &c.confirm_exit, ini("ConfirmExit"));
         add_choice(r, "updates", "Updates", c.updates, {tr("Ask"), tr("Auto"), tr("Off")},
                    [](int v) { c.updates = v; }, ini("Updates"));
+        if (!changelog().empty()) {
+            action(r, "changelog", fmt("What's new in %s", MHGU_VERSION), []() { push(View::Changelog, "changelog.back"); });
+            r.back().help = tr("This version's changes, from its release notes. The updater saved them when it installed this version.");
+        }
         add_bool(r, "bonus", "Bonus content", &c.bonus_content, ini("BonusContent"));
 #ifndef __ANDROID__  // (Android: its own tab's Save folder)
         header(r, "save.header", tr("Save data"));
@@ -2295,6 +2516,18 @@ std::vector<Row> main_rows() {
         action(r, "save.location.reset", tr("Use the default folder"), []() { s.draft.save_location[0] = 0; },
                *c.save_location != 0);
         r.back().help = tr("Keeps the save in the default folder again (%APPDATA%\\MHGURecomp\\save on Windows, ~/.local/share/MHGURecomp/save on Linux) after Save and a restart. The save in the other folder is left where it is.");
+        add_bool(r, "backups", "Save backups", &c.backups_on, ini("Backups"));
+        r.back().help = tr("Each time the game saves, the save's files are copied to a folder named after the date and time. To restore one, close the game and copy its files into save_0. Off: no backups are made; those already made stay where they are.");
+        number(r, "backups.kept", "Backups to keep", &c.save_backups, (int)lo("BackupsKept"), (int)hi("BackupsKept"), 1, ini("BackupsKept"));
+        r.back().help = tr("How many save backups are kept: past this many, the oldest is deleted.");
+        text(r, "backup.location", "Backup folder", c.backup_location, sizeof c.backup_location,
+             *c.backup_location ? c.backup_location : tr("In the save folder"), ini("BackupLocation"));
+        r.back().help = tr("Where the save backups go, for example on another drive or in a folder you sync. Empty: a backups folder in the save folder, beside save_0. Type a path, or use Choose folder. Press Save, then restart the game. Backups already made stay where they are.");
+        action(r, "backup.location.pick", tr("Choose folder"), []() { ui_request_import(11); });
+        r.back().help = tr("Opens your system's folder picker to choose the backup folder.");
+        action(r, "backup.location.reset", tr("Use the save folder"), []() { s.draft.backup_location[0] = 0; },
+               *c.backup_location != 0);
+        r.back().help = tr("Puts the save backups in a backups folder in the save folder again, after Save and a restart. Backups in the other folder are left where they are.");
 #endif
         break;
 #ifdef __ANDROID__
@@ -2314,6 +2547,10 @@ std::vector<Row> main_rows() {
         r.back().help = tr("Where the save is kept, so syncing software can keep it the same on your devices: pick the same folder on each. The folder holds save_0, like the PC version's save folder. Android asks for \"All files access\" so the app can use a folder outside its own. Press Save, then restart the app. Your current save is not moved: use Export save first to put it there.");
         action(r, "save.folder.reset", tr("Use the app's folder"), []() { s.draft.save_dir[0] = 0; }, *c.save_dir != 0);
         r.back().help = tr("Keeps the save in the app's own folder again (after Save and a restart). The save in the other folder is left where it is.");
+        add_bool(r, "backups", "Save backups", &c.backups_on, ini("Backups"));
+        r.back().help = tr("Each time the game saves, the save's files are copied to a folder named after the date and time. To restore one, close the game and copy its files into save_0. Off: no backups are made; those already made stay where they are.");
+        number(r, "backups.kept", "Backups to keep", &c.save_backups, (int)lo("BackupsKept"), (int)hi("BackupsKept"), 1, ini("BackupsKept"));
+        r.back().help = tr("How many save backups are kept: past this many, the oldest is deleted.");
         action(r, "import.save", tr("Import save"), []() { ui_request_import(2); });
         r.back().help = tr("Copies a save's system and system_backup files into the app from any folder on this device. Your current save is kept. The app closes afterwards.");
         action(r, "export.save", tr("Export save"), []() { ui_request_import(3); });
@@ -2474,6 +2711,8 @@ std::vector<Row> rows_for_view(bool *open) {
         keybind_rows(r);
     } else if (s.view == View::Actions) {
         action_rows(r);
+    } else if (s.view == View::Changelog) {
+        action(r, "changelog.back", tr("Back"), []() { pop(); });
     } else if (s.view == View::KeyCapture && acts().capture >= 0) {
         action_capture_rows(r);
     } else if (s.view == View::KeyCapture) {
@@ -3224,6 +3463,7 @@ void settings_panel(bool *open) {
                                                       : "Press a key or mouse button for: %s (Esc: cancel)",
                                       tr(acts().capture_row >= 0 ? act_row(acts().capture_row)->label : act_label(acts().capture)))
                             : s.view == View::Actions ? fmt("Game actions: %s", scheme_name(acts().dev))
+                            : s.view == View::Changelog ? fmt("What's new in %s", MHGU_VERSION)
                             : s.view == View::KeyCapture && s.capture_bind >= 0
                                 ? fmt("Press a key or mouse button for %s (Esc: cancel)", tr(bind_titles[s.capture_bind]))
                                 : tr(s.view == View::Exit         ? "Exit game?"
@@ -3236,6 +3476,8 @@ void settings_panel(bool *open) {
                                                                   : "Unsaved changes");
         ImGui::TextWrapped("%s", title.c_str());
     }
+    if (s.view == View::Changelog)  // (the room under the title the window has, less the Back row's)
+        changelog_box(vp->WorkSize.y - 2 * margin - ImGui::GetCursorPosY() - ImGui::GetFontSize() * 4);
     if (s.view == View::Keyboard) {
         ImGuiIO &io = ImGui::GetIO();
         for (ImWchar ch : io.InputQueueCharacters) {
@@ -3339,6 +3581,9 @@ void settings_panel(bool *open) {
 #else
         Config temp = s.draft;  // (a folder whose path the settings file can't hold, with ';' or '#', is not taken)
         if (which == 4 && SDL_strlcpy(temp.save_location, folder, sizeof temp.save_location) < sizeof temp.save_location &&
+            config_validate(&temp, nullptr, 0))
+            s.draft = temp;
+        if (which == 11 && SDL_strlcpy(temp.backup_location, folder, sizeof temp.backup_location) < sizeof temp.backup_location &&
             config_validate(&temp, nullptr, 0))
             s.draft = temp;
 #endif
