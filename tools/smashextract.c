@@ -25,9 +25,9 @@
 #endif
 #include "../runtime/nspimport.h"
 
-#define APP_SMASH 0x0100000000010000ull  // Super Smash Bros. Ultimate (its update's id is ...800)
+#define APP_SMASH 0x01006A800016E000ull  // Super Smash Bros. Ultimate (its update's id is 01006A800016E800)
 static const uint64_t k_games[1] = {APP_SMASH};
-#define GAME_TEXT "Super Smash Bros. Ultimate (0100000000010000)"
+#define GAME_TEXT "Super Smash Bros. Ultimate (01006A800016E000)"
 #define NEED_GB 20  // (room to ask for: the game's own size is about 16-18 GB, with the update merged)
 
 static bool is_nsp(const char *p) {

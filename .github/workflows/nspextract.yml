@@ -7,7 +7,7 @@ on:
   push:
     branches: [nsp-import]
     tags: ['nsp-extract-*']
-    paths: ['tools/nspextract.c', 'tools/smashextract.c', 'runtime/nspimport.*', 'tests/**', '.github/workflows/nspextract.yml']
+    paths: ['tools/nspextract.c', 'tools/smashextract.c', 'tools/nspmerge.c', 'runtime/nspimport.*', 'tests/**', '.github/workflows/nspextract.yml']
 permissions:
   contents: write
 jobs:
@@ -20,12 +20,14 @@ jobs:
         run: |
           gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -static -o mhgu-nsp-extract.exe tools/nspextract.c runtime/nspimport.c
           gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -static -o smash-nsp-extract.exe tools/smashextract.c runtime/nspimport.c
+          gcc -std=gnu17 -O2 -Wall -Wextra -static -o nsp-merge.exe tools/nspmerge.c
       - uses: actions/upload-artifact@v4
         with:
           name: mhgu-nsp-extract-windows
           path: |
             mhgu-nsp-extract.exe
             smash-nsp-extract.exe
+            nsp-merge.exe
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/nsp-extract-')
         uses: softprops/action-gh-release@v2
@@ -33,6 +35,7 @@ jobs:
           files: |
             mhgu-nsp-extract.exe
             smash-nsp-extract.exe
+            nsp-merge.exe
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -41,6 +44,7 @@ jobs:
         run: |
           gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -o mhgu-nsp-extract tools/nspextract.c runtime/nspimport.c
           gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -o smash-nsp-extract tools/smashextract.c runtime/nspimport.c
+          gcc -std=gnu17 -O2 -Wall -Wextra -o nsp-merge tools/nspmerge.c
       - name: Importer test (made-up NSP files and keys)
         run: |
           pip install cryptography
@@ -51,3 +55,4 @@ jobs:
           path: |
             mhgu-nsp-extract
             smash-nsp-extract
+            nsp-merge
