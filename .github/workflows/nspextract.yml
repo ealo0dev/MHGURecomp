@@ -7,7 +7,7 @@ on:
   push:
     branches: [nsp-import]
     tags: ['nsp-extract-*']
-    paths: ['tools/nspextract.c', 'runtime/nspimport.*', 'tests/**', '.github/workflows/nspextract.yml']
+    paths: ['tools/nspextract.c', 'tools/smashextract.c', 'runtime/nspimport.*', 'tests/**', '.github/workflows/nspextract.yml']
 permissions:
   contents: write
 jobs:
@@ -19,22 +19,28 @@ jobs:
         shell: bash
         run: |
           gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -static -o mhgu-nsp-extract.exe tools/nspextract.c runtime/nspimport.c
-          ./mhgu-nsp-extract.exe --bogus || true
+          gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -static -o smash-nsp-extract.exe tools/smashextract.c runtime/nspimport.c
       - uses: actions/upload-artifact@v4
         with:
           name: mhgu-nsp-extract-windows
-          path: mhgu-nsp-extract.exe
+          path: |
+            mhgu-nsp-extract.exe
+            smash-nsp-extract.exe
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/nsp-extract-')
         uses: softprops/action-gh-release@v2
         with:
-          files: mhgu-nsp-extract.exe
+          files: |
+            mhgu-nsp-extract.exe
+            smash-nsp-extract.exe
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build
-        run: gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -o mhgu-nsp-extract tools/nspextract.c runtime/nspimport.c
+        run: |
+          gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -o mhgu-nsp-extract tools/nspextract.c runtime/nspimport.c
+          gcc -std=gnu17 -O2 -Wall -Wextra -Wno-unused-parameter -o smash-nsp-extract tools/smashextract.c runtime/nspimport.c
       - name: Importer test (made-up NSP files and keys)
         run: |
           pip install cryptography
@@ -42,4 +48,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mhgu-nsp-extract-linux
-          path: mhgu-nsp-extract
+          path: |
+            mhgu-nsp-extract
+            smash-nsp-extract

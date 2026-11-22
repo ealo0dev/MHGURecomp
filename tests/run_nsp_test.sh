@@ -43,4 +43,14 @@ grep -q "another game" "$W/o2.log" || { echo "no clear message for another game"
 if (cd "$W/xout" && MHGU_NSP_ANY_VERSION=1 ./ext --out "$W/o3" "$W/x/base.nsp" "$W/y/update.nsp" < /dev/null > "$W/o3.log" 2>&1); then echo "mixed games were taken"; exit 1; fi
 grep -q "different games" "$W/o3.log" || { echo "no clear message for mixed games"; exit 1; }
 echo "other game / mixed games: OK"
+
+# Super Smash Bros. Ultimate's extractor (tools/smashextract.c): its ids, its folder; MHGU's files are refused
+python3 tests/gen_test_nsp.py "$W/s" --seed 21 --app-id 0100000000010000 --same-id > /dev/null
+$CC -std=gnu17 -O1 -g -Wall -Wextra -Wno-unused-parameter tools/smashextract.c runtime/nspimport.c -o "$W/smash"
+mkdir -p "$W/sout"; cp "$W/smash" "$W/s/prod.keys" "$W/s/base.nsp" "$W/s/update.nsp" "$W/sout/"
+(cd "$W/sout" && ./smash < /dev/null > run.log 2>&1) || { echo "smash: extractor failed"; cat "$W/sout/run.log"; exit 1; }
+diff -r "$W/s/expected" "$W/sout/smash-ultimate" > /dev/null || { echo "smash: the extracted files differ"; exit 1; }
+if (cd "$W/xout" && "$W/smash" --keys "$W/x/prod.keys" --out "$W/o4" "$W/y/base.nsp" "$W/y/update.nsp" < /dev/null > "$W/o4.log" 2>&1); then echo "smash took MHGU"; exit 1; fi
+grep -q "another game" "$W/o4.log" || { echo "smash: no clear message for another game"; exit 1; }
+echo "smash: OK"
 echo "test-nsp: OK"
